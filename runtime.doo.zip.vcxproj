@@ -208,9 +208,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include=".\ziparchive.h" />
+    <ClInclude Include="component_manifest.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include=".\ziparchive.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="..\shared\component_manifest.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

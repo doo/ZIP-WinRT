@@ -19,6 +19,11 @@ namespace runtime {
           Windows::Storage::Streams::IRandomAccessStream^ stream
           );
 
+        Windows::Foundation::IAsyncAction^ ExtractAsync(
+          Windows::Storage::Streams::IRandomAccessStream^ stream,
+          Windows::Storage::IStorageFile^ destination
+          );
+
         property Platform::String^ Filename {
           Platform::String^ get() {
             return filename;
@@ -76,8 +81,19 @@ namespace runtime {
           Windows::Storage::Streams::IInputStream^ stream, 
           const concurrency::cancellation_token& cancellationToken
           );
+        void DeflateFromStreamToFile(
+          Windows::Storage::Streams::IInputStream^ stream,
+          FILE* out,
+          const concurrency::cancellation_token& cancellationToken
+          );
+        void CopyFromStreamToFile(
+          Windows::Storage::Streams::IInputStream^ stream,
+          FILE* out,
+          const concurrency::cancellation_token& cancellationToken
+          );
         Windows::Storage::Streams::IBuffer^ UncompressedFromStream(
           Windows::Storage::Streams::IInputStream^ stream, 
+          unsigned int maxBufSize,
           const concurrency::cancellation_token& cancellationToken
           );
       };
@@ -93,6 +109,11 @@ namespace runtime {
           );
 
         AsyncBufferOperation GetFileContentsAsync(Platform::String^ filename);
+        Windows::Foundation::IAsyncAction^ ExtractFileAsync(
+          Platform::String^ filename, 
+          Windows::Storage::IStorageFile^ destination);
+        Windows::Foundation::IAsyncAction^ ExtractAllAsync(
+          Windows::Storage::IStorageFolder^ destination);
 
         property Platform::Array<Platform::String^>^ Files {
           Platform::Array<Platform::String^>^ get();
@@ -114,7 +135,7 @@ namespace runtime {
 
         Platform::Array<ZipArchiveEntry^>^ archiveEntries;
         Windows::Storage::Streams::IRandomAccessStream^ randomAccessStream;
-
+        Windows::Storage::IStorageFile^ CreateFileInFolder(Windows::Storage::IStorageFolder^ parent, const std::wstring& filename);
         ZipArchive(
           Windows::Storage::Streams::IRandomAccessStream^ stream, 
           concurrency::cancellation_token cancellationToken

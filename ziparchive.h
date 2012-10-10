@@ -9,8 +9,34 @@ namespace runtime {
       typedef Windows::Foundation::IAsyncOperation<Windows::Storage::Streams::IBuffer^>^ 
         AsyncBufferOperation;
 
-      private ref class ZipArchiveEntry sealed {
+      public ref class ZipArchiveEntry sealed {
+        friend ref class ZipArchive;
       public:
+        property Platform::String^ Filename {
+          Platform::String^ get() {
+            return filename;
+          }
+        }
+
+        property uint32 CompressedSize {
+          uint32 get() {
+            return localHeader.compressedSize;
+          }
+        }
+
+        property uint32 UncompressedSize {
+          uint32 get() {
+            return localHeader.uncompressedSize;
+          }
+        }
+
+        property boolean IsDirectory {
+          boolean get() {
+            return filename->Data()[filename->Length()-1] == '/';
+          }
+        }
+
+      private:
         ZipArchiveEntry(
           Windows::Storage::Streams::IRandomAccessStream^ centralDirectoryRecordStream
           );
@@ -24,19 +50,7 @@ namespace runtime {
           Windows::Storage::IStorageFile^ destination
           );
 
-        property Platform::String^ Filename {
-          Platform::String^ get() {
-            return filename;
-          }
-        }
-
-        property boolean IsDirectory {
-          boolean get() {
-            return filename->Data()[filename->Length()-1] == '/';
-          }
-        }
 #pragma pack(1)
-      private:
         struct LocalFileHeader {
           uint32 signature;
           uint16 version;
@@ -98,6 +112,7 @@ namespace runtime {
           );
       };
 
+      // the main archive class
       public ref class ZipArchive sealed {
         typedef Windows::Foundation::IAsyncOperation<ZipArchive^>^ AsyncZipArchiveOperation;
       public:
@@ -112,11 +127,17 @@ namespace runtime {
         Windows::Foundation::IAsyncAction^ ExtractFileAsync(
           Platform::String^ filename, 
           Windows::Storage::IStorageFile^ destination);
+        Windows::Foundation::IAsyncAction^ ExtractFileToFolderAsync(
+          Platform::String^ filename,
+          Windows::Storage::IStorageFolder^ destinationFolder
+          );
         Windows::Foundation::IAsyncAction^ ExtractAllAsync(
           Windows::Storage::IStorageFolder^ destination);
 
-        property Platform::Array<Platform::String^>^ Files {
-          Platform::Array<Platform::String^>^ get();
+        property Platform::Array<ZipArchiveEntry^>^ Files {
+          Platform::Array<ZipArchiveEntry^>^ get() {
+            return archiveEntries;
+          };
         }
 
       private:
@@ -135,7 +156,11 @@ namespace runtime {
 
         Platform::Array<ZipArchiveEntry^>^ archiveEntries;
         Windows::Storage::Streams::IRandomAccessStream^ randomAccessStream;
-        Windows::Storage::IStorageFile^ CreateFileInFolder(Windows::Storage::IStorageFolder^ parent, const std::wstring& filename);
+        concurrency::task<Windows::Storage::IStorageFile^> 
+          CreateFileInFolderAsync(
+            Windows::Storage::IStorageFolder^ parent, 
+            const std::wstring& filename);
+
         ZipArchive(
           Windows::Storage::Streams::IRandomAccessStream^ stream, 
           concurrency::cancellation_token cancellationToken

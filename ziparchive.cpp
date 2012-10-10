@@ -243,7 +243,7 @@ void ZipArchiveEntry::CopyFromStreamToFile(Windows::Storage::Streams::IInputStre
 
 IAsyncAction^ ZipArchiveEntry::ExtractAsync(IRandomAccessStream^ stream, 
   Windows::Storage::IStorageFile^ destination) {
-  return concurrency::create_async([=](concurrency::cancellation_token cancellationToken) {
+  return concurrency::create_async([=](cancellation_token cancellationToken) {
     FILE* fileHandle;
     auto openResult = _wfopen_s(&fileHandle, destination->Path->Data(), L"wb");
     if (openResult != 0) {
@@ -312,24 +312,6 @@ ZipArchive::ZipArchive(IRandomAccessStream^ stream, cancellation_token cancellat
   }
 }
 
-Platform::Array<String^>^ ZipArchive::Files::get() {
-      std::vector<Platform::String^> fileList;
-      for (ZipArchiveEntry^* zipFileEntry = archiveEntries->begin(); 
-        zipFileEntry != archiveEntries->end(); 
-        zipFileEntry++) {
-          if (!(*zipFileEntry)->IsDirectory) {
-            fileList.push_back((*zipFileEntry)->Filename);
-          }
-      }
-      unsigned int arraySize = static_cast<unsigned int>(fileList.size());
-      Platform::Array<Platform::String^>^ result = 
-        ref new Platform::Array<Platform::String^>(arraySize);
-      for (unsigned int i = 0; i < fileList.size(); i++) {
-        result[i] = fileList.at(i);
-      }
-      return result;
-};
-
 /************************************************************************/
 /* Constructor function to create a zip archive from a stream reference */
 /************************************************************************/
@@ -379,30 +361,43 @@ IAsyncOperation<IBuffer^>^ ZipArchive::GetFileContentsAsync(String^ filename) {
   });
 }
 
-IStorageFile^ ZipArchive::CreateFileInFolder(IStorageFolder^ parent, const std::wstring& filename) {
-  auto pos = filename.find(L"/");
-  if (pos == std::wstring::npos) {
-    auto createFileOp = concurrency::create_task(parent->CreateFileAsync(ref new Platform::String(filename.c_str()), 
-      Windows::Storage::CreationCollisionOption::ReplaceExisting));
-    return createFileOp.get();
-  } else {
-    auto dirname = filename.substr(0, pos);
-    auto remainingFilename = filename.substr(pos+1, std::wstring::npos);
-    auto task = concurrency::create_task(
-      parent->CreateFolderAsync(ref new Platform::String(dirname.c_str()), 
-        Windows::Storage::CreationCollisionOption::OpenIfExists));
-    IStorageFolder^ newParent = task.get();
-    return CreateFileInFolder(newParent, remainingFilename);
+concurrency::task<IStorageFile^> ZipArchive::CreateFileInFolderAsync(
+  IStorageFolder^ parent, const std::wstring& filename) {
+
+  std::wstring currentFilename = filename;
+  concurrency::task<IStorageFolder^> antecedent = concurrency::create_task([parent]() {
+    return parent;
+  });
+
+  while (true) {
+    auto directorySeperatorPos = currentFilename.find(L"/");
+
+    if (directorySeperatorPos == std::wstring::npos) {
+      return antecedent.then([currentFilename](IStorageFolder^ parent) {
+        return reinterpret_cast<IAsyncOperation<IStorageFile^>^>(parent->CreateFileAsync(ref new Platform::String(currentFilename.c_str()),
+          Windows::Storage::CreationCollisionOption::ReplaceExisting));
+      }, concurrency::task_continuation_context::use_arbitrary());
+    } else {
+      auto dirname = currentFilename.substr(0, directorySeperatorPos);
+      currentFilename = filename.substr(directorySeperatorPos+1, std::wstring::npos);
+      antecedent = antecedent.then([dirname](IStorageFolder^ parent) {
+        return reinterpret_cast<IAsyncOperation<IStorageFolder^>^>(parent->CreateFolderAsync(ref new Platform::String(dirname.c_str()), 
+          Windows::Storage::CreationCollisionOption::OpenIfExists));
+      }, concurrency::task_continuation_context::use_arbitrary());
+      
+    }
   }
 }
 IAsyncAction^ ZipArchive::ExtractAllAsync(IStorageFolder^ destination) {
-  return concurrency::create_async([=]() -> void {
+  return concurrency::create_async([this, destination]() -> void {
     std::vector<concurrency::task<void>> copyOperations;
     for (unsigned int i = 0; i < archiveEntries->Length; i++) {
       std::wstring filename = archiveEntries[i]->Filename->Data();
       if (filename[filename.length()-1] != '/') {
-        IStorageFile^ file = CreateFileInFolder(destination, filename);
-        copyOperations.push_back(concurrency::task<void>(archiveEntries[i]->ExtractAsync(randomAccessStream, file)));
+        auto extractTask = concurrency::task<void>(CreateFileInFolderAsync(destination, filename).then([this, i](IStorageFile^ file) {
+          return archiveEntries[i]->ExtractAsync(randomAccessStream, file);
+        }));
+        copyOperations.push_back(extractTask);
       }
     }
     concurrency::when_all(copyOperations.begin(), copyOperations.end()).wait();
@@ -420,5 +415,13 @@ IAsyncAction^ ZipArchive::ExtractFileAsync(Platform::String^ filename, IStorageF
   return concurrency::create_async([filename]() {
     Platform::String^ errorMessage = ref new Platform::String(L"File not found: ") + filename;
     throw ref new Platform::InvalidArgumentException(errorMessage);
+  });
+}
+
+IAsyncAction^ ZipArchive::ExtractFileToFolderAsync(Platform::String^ filename, IStorageFolder^ destination) {
+  return concurrency::create_async([=]() {
+    return CreateFileInFolderAsync(destination, filename->Data()).then([this, &filename](IStorageFile^ file) {
+      return ExtractFileAsync(filename, file);
+    });
   });
 }

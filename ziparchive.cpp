@@ -379,7 +379,7 @@ concurrency::task<IStorageFile^> ZipArchive::CreateFileInFolderAsync(
       }, concurrency::task_continuation_context::use_arbitrary());
     } else {
       auto dirname = currentFilename.substr(0, directorySeperatorPos);
-      currentFilename = filename.substr(directorySeperatorPos+1, std::wstring::npos);
+      currentFilename = currentFilename.substr(directorySeperatorPos+1, std::wstring::npos);
       antecedent = antecedent.then([dirname](IStorageFolder^ parent) {
         return reinterpret_cast<IAsyncOperation<IStorageFolder^>^>(parent->CreateFolderAsync(ref new Platform::String(dirname.c_str()), 
           Windows::Storage::CreationCollisionOption::OpenIfExists));
@@ -389,18 +389,18 @@ concurrency::task<IStorageFile^> ZipArchive::CreateFileInFolderAsync(
   }
 }
 IAsyncAction^ ZipArchive::ExtractAllAsync(IStorageFolder^ destination) {
-  return concurrency::create_async([this, destination]() -> void {
+  return concurrency::create_async([this, destination]() -> concurrency::task<void> {
     std::vector<concurrency::task<void>> copyOperations;
     for (unsigned int i = 0; i < archiveEntries->Length; i++) {
       std::wstring filename = archiveEntries[i]->Filename->Data();
       if (filename[filename.length()-1] != '/') {
-        auto extractTask = concurrency::task<void>(CreateFileInFolderAsync(destination, filename).then([this, i](IStorageFile^ file) {
+        auto extractTask = CreateFileInFolderAsync(destination, filename).then([this, i](IStorageFile^ file) {
           return archiveEntries[i]->ExtractAsync(randomAccessStream, file);
-        }));
+        });
         copyOperations.push_back(extractTask);
       }
     }
-    concurrency::when_all(copyOperations.begin(), copyOperations.end()).wait();
+    return concurrency::when_all(copyOperations.begin(), copyOperations.end());
   });
 }
 

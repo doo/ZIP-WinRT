@@ -18,10 +18,13 @@ using Platform::Array;
 using Microsoft::WRL::ComPtr;
 
 using Windows::Foundation::IAsyncOperation;
+using Windows::Foundation::IAsyncAction;
 using Windows::Storage::Streams::IBuffer;
 using Windows::Storage::Streams::IBufferByteAccess;
 using Windows::Storage::Streams::IInputStream;
 using Windows::Storage::Streams::IRandomAccessStream;
+using Windows::Storage::IStorageFile;
+using Windows::Storage::IStorageFolder;
 
 using concurrency::cancellation_token;
 
@@ -40,10 +43,10 @@ static ComPtr<IBufferByteAccess> getByteAccessForBuffer(IBuffer^ buffer) {
 // Helper method to comfortably read data from an IDataReader into a memory location
 static void readBytesFromDataReader(Windows::Storage::Streams::IDataReader^ dataReader, 
                              uint32 length, void* destination, size_t destSize) {
-  concurrency::task<uint32> readDataTask(dataReader->LoadAsync(length));
-  uint32 bytesRead = readDataTask.get();
-  if (bytesRead != length) {
-    throw ref new Platform::FailureException(L"Could not read expected amount of data");
+  uint32 read = 0;
+  while (read < length) {
+    concurrency::task<uint32> readDataTask(dataReader->LoadAsync(length-read));
+    read += readDataTask.get();
   }
   auto buffer = dataReader->ReadBuffer(length);
   auto byteBuffer = getByteAccessForBuffer(buffer);
@@ -89,7 +92,7 @@ ZipArchiveEntry::ZipArchiveEntry(IRandomAccessStream^ stream) {
     sizeof(ZipArchiveEntry::CentralDirectoryRecord), 
     &centralDirectoryRecord, 
     sizeof(centralDirectoryRecord));
-  // make sure the stream stays usuable for the next record
+  // make sure the stream stays usable for the next record
   dataReader->DetachStream();
 
   if (centralDirectoryRecord.signature != ZipArchive_CENTRAL_DIRECTORY_RECORD_SIGNATURE) {
@@ -131,18 +134,24 @@ void ZipArchiveEntry::ReadAndCheckLocalHeader(IInputStream^ stream) {
 
 /************************************************************************/
 /* The file isn't compressed, just pass it through from the stream      */
+/* If maxBufSize is larger 0, the buffer size will be limitied          */
 /************************************************************************/
 IBuffer^ ZipArchiveEntry::UncompressedFromStream(IInputStream^ stream, 
+                                              unsigned int maxBufSize,
                                               const cancellation_token& cancellationToken) {
   auto dataReader = ref new Windows::Storage::Streams::DataReader(stream);
-  concurrency::task<uint32> loadDataTask(
-    dataReader->LoadAsync(centralDirectoryRecord.compressedSize));
-  uint32 bytesRead = loadDataTask.get();
-  if (bytesRead != centralDirectoryRecord.compressedSize) {
-    throw ref new Platform::FailureException(L"Could not read file data: " + filename);
+  uint32 bytesToRead = centralDirectoryRecord.compressedSize;
+  if (maxBufSize > 0 && maxBufSize < bytesToRead) {
+    bytesToRead = maxBufSize;
   }
-  Windows::Storage::Streams::IBuffer^ result = 
-    dataReader->ReadBuffer(centralDirectoryRecord.compressedSize);
+
+  uint32 bytesRead = 0;
+  while (bytesRead < bytesToRead) {
+    concurrency::task<uint32> loadDataTask(dataReader->LoadAsync(bytesToRead-bytesRead));
+    bytesRead += loadDataTask.get();
+  }
+
+  Windows::Storage::Streams::IBuffer^ result = dataReader->ReadBuffer(bytesToRead);
   return result;
 }
 
@@ -151,7 +160,7 @@ IBuffer^ ZipArchiveEntry::UncompressedFromStream(IInputStream^ stream,
 /************************************************************************/
 IBuffer^ ZipArchiveEntry::DeflateFromStream(IInputStream^ stream, 
                                             const cancellation_token& cancellationToken) {
-  IBuffer^ compressedBuffer = UncompressedFromStream(stream, cancellationToken);
+  IBuffer^ compressedBuffer = UncompressedFromStream(stream, 0, cancellationToken);
   
   if (cancellationToken.is_canceled()) { return nullptr; }
 
@@ -178,15 +187,92 @@ IBuffer^ ZipArchiveEntry::DeflateFromStream(IInputStream^ stream,
   return writer->DetachBuffer();
 }
 
+int __cdecl decompressCallback(const void *buf, int len, void *pUser) {
+  auto outFile = reinterpret_cast<FILE*>(pUser);
+  if (fwrite(buf, 1, len, outFile) == len) {
+    return 1;
+  } else {
+    return 0;
+  }
+}
+
+void ZipArchiveEntry::DeflateFromStreamToFile( 
+  Windows::Storage::Streams::IInputStream^ in, 
+  FILE* out, 
+  const concurrency::cancellation_token& cancellationToken ) {
+    // for now just read the whole uncompressed buffer into memory
+    // this can probably be optimized later on
+    IBuffer^ compressedBuffer = UncompressedFromStream(in, 0, cancellationToken);
+
+    if (cancellationToken.is_canceled()) { return; }
+
+    auto compressedBufferByteAccess = getByteAccessForBuffer(compressedBuffer);
+    byte* data;
+    compressedBufferByteAccess->Buffer(&data);
+    size_t compressedBufferSize = compressedBuffer->Length;
+    auto decompressionResult = tinfl_decompress_mem_to_callback(
+      data,
+      &compressedBufferSize, 
+      decompressCallback, 
+      reinterpret_cast<void*>(out), 
+      0);
+
+    if (decompressionResult != 1) {
+      throw ref new Platform::FailureException(L"Could not extract data for file " + filename);
+    }
+}
+
+#define BUFSIZE 1024*1024
+void ZipArchiveEntry::CopyFromStreamToFile(Windows::Storage::Streams::IInputStream^ stream, 
+  FILE* out, 
+  const concurrency::cancellation_token& cancellationToken ) {
+    unsigned int written = 0;
+    while (written < centralDirectoryRecord.uncompressedSize) {
+      if (cancellationToken.is_canceled()) {
+        concurrency::cancel_current_task();
+      }
+      unsigned int bytesToRead = min(BUFSIZE, centralDirectoryRecord.uncompressedSize-written);
+      IBuffer^ buf = UncompressedFromStream(stream, bytesToRead, cancellationToken);
+      auto compressedBufferByteAccess = getByteAccessForBuffer(buf);
+      byte* data;
+      compressedBufferByteAccess->Buffer(&data);
+      fwrite(data, sizeof(byte), buf->Length, out);
+      written += buf->Length;
+    }
+}
+
+IAsyncAction^ ZipArchiveEntry::ExtractAsync(IRandomAccessStream^ stream, 
+  Windows::Storage::IStorageFile^ destination) {
+  return concurrency::create_async([=](cancellation_token cancellationToken) {
+    FILE* fileHandle;
+    auto openResult = _wfopen_s(&fileHandle, destination->Path->Data(), L"wb");
+    if (openResult != 0) {
+      throw ref new Platform::AccessDeniedException("Could not write to file " + destination->Path);
+    }
+    auto outFile = std::shared_ptr<FILE>(fileHandle, [](FILE* ptr) {
+      fclose(ptr);
+    });
+    IInputStream^ zipArchiveDataInputStream = stream->GetInputStreamAt(contentStreamStart);
+    switch (centralDirectoryRecord.compressionMethod) {
+      case 0: // file is uncompressed, read it in chunks
+        CopyFromStreamToFile(zipArchiveDataInputStream, outFile.get(), cancellationToken);
+        break;
+      case 8: // deflate
+        DeflateFromStreamToFile(zipArchiveDataInputStream, outFile.get(), cancellationToken);
+        break;
+    }
+  });
+}
+
 IAsyncOperation<IBuffer^>^ ZipArchiveEntry::GetUncompressedFileContents(
   IRandomAccessStream^ stream) {
   return concurrency::create_async([=](cancellation_token cancellationToken) {
-    IInputStream^ ZipArchiveDataInputStream = stream->GetInputStreamAt(contentStreamStart);
+    IInputStream^ zipArchiveDataInputStream = stream->GetInputStreamAt(contentStreamStart);
     switch (centralDirectoryRecord.compressionMethod) {
     case 0:  // file is uncompressed
-      return UncompressedFromStream(ZipArchiveDataInputStream, cancellationToken);
+      return UncompressedFromStream(zipArchiveDataInputStream, 0, cancellationToken);
     case 8: // deflate
-      return DeflateFromStream(ZipArchiveDataInputStream, cancellationToken);
+      return DeflateFromStream(zipArchiveDataInputStream, cancellationToken);
     default:
       throw ref new Platform::FailureException(L"Compression algorithm not supported: " + 
         centralDirectoryRecord.compressionMethod);
@@ -226,24 +312,6 @@ ZipArchive::ZipArchive(IRandomAccessStream^ stream, cancellation_token cancellat
   }
 }
 
-Platform::Array<String^>^ ZipArchive::Files::get() {
-      std::vector<Platform::String^> fileList;
-      for (ZipArchiveEntry^* zipFileEntry = archiveEntries->begin(); 
-        zipFileEntry != archiveEntries->end(); 
-        zipFileEntry++) {
-          if (!(*zipFileEntry)->IsDirectory) {
-            fileList.push_back((*zipFileEntry)->Filename);
-          }
-      }
-      unsigned int arraySize = static_cast<unsigned int>(fileList.size());
-      Platform::Array<Platform::String^>^ result = 
-        ref new Platform::Array<Platform::String^>(arraySize);
-      for (unsigned int i = 0; i < fileList.size(); i++) {
-        result[i] = fileList.at(i);
-      }
-      return result;
-};
-
 /************************************************************************/
 /* Constructor function to create a zip archive from a stream reference */
 /************************************************************************/
@@ -264,7 +332,7 @@ IAsyncOperation<ZipArchive^>^ ZipArchive::CreateFromStreamReferenceAsync(
 /************************************************************************/
 /* Instantiate a ZipArchive object from an IStorageFile                 */
 /************************************************************************/
-IAsyncOperation<ZipArchive^>^ ZipArchive::CreateFromFileAsync(Windows::Storage::IStorageFile^ file) {
+IAsyncOperation<ZipArchive^>^ ZipArchive::CreateFromFileAsync(IStorageFile^ file) {
   return concurrency::create_async([=](cancellation_token cancellationToken) -> ZipArchive^ {
     auto fileOpenTask = concurrency::task<IRandomAccessStream^>(
       file->OpenAsync(Windows::Storage::FileAccessMode::Read));
@@ -278,8 +346,8 @@ IAsyncOperation<ZipArchive^>^ ZipArchive::CreateFromFileAsync(Windows::Storage::
 /************************************************************************/
 /* Get the uncompressed file contents as an IBuffer                     */
 /************************************************************************/
-IAsyncOperation<Windows::Storage::Streams::IBuffer^>^ ZipArchive::GetFileContentsAsync(String^ filename) {
-  return concurrency::create_async([=]() -> Windows::Storage::Streams::IBuffer^ {
+IAsyncOperation<IBuffer^>^ ZipArchive::GetFileContentsAsync(String^ filename) {
+  return concurrency::create_async([=]() -> IBuffer^ {
     for (unsigned int i = 0; i < archiveEntries->Length; i++) {
       if (wcscmp(archiveEntries[i]->Filename->Data(), filename->Data()) == 0) {
         if (concurrency::is_task_cancellation_requested()) {
@@ -290,5 +358,70 @@ IAsyncOperation<Windows::Storage::Streams::IBuffer^>^ ZipArchive::GetFileContent
       }
     }
     return nullptr;
+  });
+}
+
+concurrency::task<IStorageFile^> ZipArchive::CreateFileInFolderAsync(
+  IStorageFolder^ parent, const std::wstring& filename) {
+
+  std::wstring currentFilename = filename;
+  concurrency::task<IStorageFolder^> antecedent = concurrency::create_task([parent]() {
+    return parent;
+  });
+
+  while (true) {
+    auto directorySeperatorPos = currentFilename.find(L"/");
+
+    if (directorySeperatorPos == std::wstring::npos) {
+      return antecedent.then([currentFilename](IStorageFolder^ parent) {
+        return reinterpret_cast<IAsyncOperation<IStorageFile^>^>(parent->CreateFileAsync(ref new Platform::String(currentFilename.c_str()),
+          Windows::Storage::CreationCollisionOption::ReplaceExisting));
+      }, concurrency::task_continuation_context::use_arbitrary());
+    } else {
+      auto dirname = currentFilename.substr(0, directorySeperatorPos);
+      currentFilename = currentFilename.substr(directorySeperatorPos+1, std::wstring::npos);
+      antecedent = antecedent.then([dirname](IStorageFolder^ parent) {
+        return reinterpret_cast<IAsyncOperation<IStorageFolder^>^>(parent->CreateFolderAsync(ref new Platform::String(dirname.c_str()), 
+          Windows::Storage::CreationCollisionOption::OpenIfExists));
+      }, concurrency::task_continuation_context::use_arbitrary());
+      
+    }
+  }
+}
+IAsyncAction^ ZipArchive::ExtractAllAsync(IStorageFolder^ destination) {
+  return concurrency::create_async([this, destination]() -> concurrency::task<void> {
+    std::vector<concurrency::task<void>> copyOperations;
+    for (unsigned int i = 0; i < archiveEntries->Length; i++) {
+      std::wstring filename = archiveEntries[i]->Filename->Data();
+      if (filename[filename.length()-1] != '/') {
+        auto extractTask = CreateFileInFolderAsync(destination, filename).then([this, i](IStorageFile^ file) {
+          return archiveEntries[i]->ExtractAsync(randomAccessStream, file);
+        });
+        copyOperations.push_back(extractTask);
+      }
+    }
+    return concurrency::when_all(copyOperations.begin(), copyOperations.end());
+  });
+}
+
+IAsyncAction^ ZipArchive::ExtractFileAsync(Platform::String^ filename, IStorageFile^ destination) {
+  const wchar_t* fileToExtract = filename->Data();
+  for (unsigned int i = 0; i < archiveEntries->Length; i++) {
+    const wchar_t* currentFilename = archiveEntries[i]->Filename->Data();
+    if (wcscmp(fileToExtract, currentFilename) == 0) {
+      return archiveEntries[i]->ExtractAsync(randomAccessStream, destination);
+    }
+  }
+  return concurrency::create_async([filename]() {
+    Platform::String^ errorMessage = ref new Platform::String(L"File not found: ") + filename;
+    throw ref new Platform::InvalidArgumentException(errorMessage);
+  });
+}
+
+IAsyncAction^ ZipArchive::ExtractFileToFolderAsync(Platform::String^ filename, IStorageFolder^ destination) {
+  return concurrency::create_async([=]() {
+    return CreateFileInFolderAsync(destination, filename->Data()).then([this, &filename](IStorageFile^ file) {
+      return ExtractFileAsync(filename, file);
+    });
   });
 }

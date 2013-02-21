@@ -91,7 +91,7 @@ BEGIN
             VALUE "LegalCopyright", DOO_COPYRIGHT
             VALUE "ProductName", DOO_PRODUCT_NAME
             VALUE "ProductVersion", DOO_PRODUCT_VERSION_STRING
-            VALUE "Internet", "https://doo.net"
+            VALUE "Internet", "https://github.com/doo/ZIP-WinRT"
 #ifdef COMPONENT_AUTHOR
             VALUE "Author", COMPONENT_AUTHOR
 #endif

@@ -1,0 +1,8 @@
+Debug/
+Release/
+ARM/
+x64/
+Generated Files/
+runtime.doo.zip.opensdf
+runtime.doo.zip.sdf
+runtime.doo.zip.v11.suo

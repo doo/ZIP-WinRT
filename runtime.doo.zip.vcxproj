@@ -214,7 +214,7 @@
     <ClCompile Include=".\ziparchive.cpp" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="..\shared\component_manifest.rc" />
+    <ResourceCompile Include="component_manifest.rc" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

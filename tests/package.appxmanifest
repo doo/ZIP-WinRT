@@ -15,9 +15,9 @@
   </Resources>
   <Applications>
     <Application Id="App" StartPage="default.html">
-      <VisualElements DisplayName="ZIP-WinRT tests" Logo="images\logo.png" SmallLogo="images\smalllogo.png" Description="Jasmine powered specs for the ZIP-WinRT component" ForegroundText="light" BackgroundColor="#464646">
-        <DefaultTile ShowName="allLogos" ShortName="ZIP-WinRT tests" />
-        <SplashScreen Image="images\splashscreen.png" />
+      <VisualElements DisplayName="ZIP-WinRT tests" Logo="images\logo.png" SmallLogo="images\smalllogo.png" Description="Jasmine powered specs for the ZIP-WinRT component" ForegroundText="dark" BackgroundColor="#ff9408">
+        <DefaultTile ShowName="allLogos" ShortName="ZIP-WinRT tests" WideLogo="images\WideLogo.png" />
+        <SplashScreen Image="images\splashscreen.png" BackgroundColor="#ff9408" />
       </VisualElements>
     </Application>
   </Applications>
